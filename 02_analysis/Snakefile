@@ -1,0 +1,251 @@
+onsuccess:
+    shell("send.py log -l {log}")
+
+onerror:
+    shell("send.py log -l {log} --return_code 1")
+    
+
+configfile: 
+    "config.yml"
+
+names = config['samples']
+
+rule all:
+    input:
+        # 6mA results
+        expand('6ma_results/bw_files/{name}.6mA.{bam_type}.bw', name=names, bam_type=['raw', 'q2', 'q2.1kb']),
+        expand('6ma_results/{name}.6mA_genome_pos.tsv.gz', name=names),
+
+        # 5mC results
+        expand('5mc_results/{name}.{mod}_genome_pos.tsv.gz', name=names, mod=['CG', 'CHG', 'CHH', '5mC']),
+        expand('5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.bw', name=names, mod=['CG', 'CHG', 'CHH']),
+        expand('5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.sorted.tsv.gz', name=names, mod=['CG', 'CHG', 'CHH']),
+
+        # coverage results
+        expand('aligned_data/{name}.sorted.bw', name=names),
+        expand('aligned_data/{name}.sorted.{bam_type}.bw', name=names, bam_type=['q2', 'q2.1kb']),
+
+
+rule modbam2bed_6mA_raw:
+    input:
+        'aligned_data/{name}.sorted.bam'
+    output:
+        '6ma_results/bw_files/{name}.6mA.raw.bed.gz'
+    params:
+        genome=config['genome'],
+        bed='6ma_results/bw_files/{name}.6mA.raw.bed'
+    threads: 20
+    conda:
+        'methy'
+    shell:
+        '''
+modbam2bed -e -m 6mA -b 0.5 -t {threads} {params.genome} {input} > {params.bed}
+bgzip {params.bed}
+tabix -p bed {output}
+        '''
+
+
+rule samtools_uniq:
+    input:
+        'aligned_data/{name}.sorted.bam'
+    output:
+        bam = 'aligned_data/{name}.sorted.q2.bam',
+        bai = 'aligned_data/{name}.sorted.q2.bam.bai'
+    threads: 16
+    shell:
+        '''
+samtools view -@ {threads} -hbq2 -F 2048 {input} > {output.bam}
+samtools index {output.bam}
+        '''
+
+
+rule filter_bam_by_length:
+    input:
+        'aligned_data/{name}.sorted.q2.bam'
+    output:
+        bam='aligned_data/{name}.sorted.q2.1kb.bam',
+        bai='aligned_data/{name}.sorted.q2.1kb.bam.bai',
+    threads: 16
+    shell:
+        '''
+python scripts/filter_bam_by_length.py -i {input} -o {output.bam}
+        '''
+
+
+rule modbam2bed_6mA_uniq:
+    input:
+        'aligned_data/{name}.sorted.{bam_type}.bam'
+    output:
+        bedgz='6ma_results/bw_files/{name}.6mA.{bam_type}.bed.gz',
+        tabix='6ma_results/bw_files/{name}.6mA.{bam_type}.bed.gz.tbi'
+    params:
+        genome=config['genome'],
+        bed='6ma_results/bw_files/{name}.6mA.{bam_type}.bed'
+    threads: 20
+    conda:
+        'methy'
+    shell:
+        '''
+modbam2bed -e -m 6mA -b 0.5 -t {threads} {params.genome} {input} > {params.bed}
+bgzip {params.bed}
+tabix -p bed {output.bedgz}
+        '''
+
+
+rule make_6mA_bw:
+    input:
+        '6ma_results/bw_files/{name}.6mA.{bam_type}.bed.gz'
+    output:
+        bdg=temp('6ma_results/bw_files/{name}.6mA.{bam_type}.bdg'),
+        bw='6ma_results/bw_files/{name}.6mA.{bam_type}.bw'
+    params:
+        genome_size=config['genome_size']
+    threads: 1
+    shell:
+        '''
+pigz -cdp 16 {input} | awk '{{if($10>=10) print $1"\\t"$2"\\t"$3"\\t"$11}}' > {output.bdg}
+bedGraphToBigWig {output.bdg} {params.genome_size} {output.bw}
+        '''
+
+
+rule convert_6ma_into_genome_pos:
+    input:
+        inbam='aligned_data/{name}.sorted.bam',
+        inmod='6ma_results/{name}.6mA_read_pos.tsv.gz',
+    output:
+        tsv='6ma_results/{name}.6mA_genome_pos.tsv',
+    threads: 1
+    params:
+        genome_pkl=config['genome_pkl']
+    resources:
+        mem='20g'
+    shell:
+        '''
+python scripts/convert_6ma_into_genome_pos.py --inbam {input.inbam} --inmod {input.inmod} --genome_pkl {params.genome_pkl}  --outfile {output.tsv}
+        '''
+
+
+rule tabix_index_6ma:
+    input:
+        '6ma_results/{name}.6mA_genome_pos.tsv'
+    output:
+        bgzip = '6ma_results/{name}.6mA_genome_pos.tsv.gz',
+        tbi = '6ma_results/{name}.6mA_genome_pos.tsv.gz.tbi'
+    threads: 1
+    shell:
+        '''
+bgzip {input}
+tabix -0 -s 3 -b 4 -e 5 -S 1 {output.bgzip}
+        '''
+
+
+rule convert_5mC_into_genome_pos:
+    input:
+        inbam='aligned_data/{name}.sorted.bam',
+        inmod='5mc_results/{name}.C.call_mods.tsv.gz',
+    output:
+        '5mc_results/{name}.5mC_genome_pos.tsv',
+        '5mc_results/{name}.CG_genome_pos.tsv',
+        '5mc_results/{name}.CHG_genome_pos.tsv',
+        '5mc_results/{name}.CHH_genome_pos.tsv',
+    params:
+        outprefix='5mc_results/{name}'
+    threads: 1
+    shell:
+        '''
+python scripts/convert_5mc_into_genome_pos.py --inbam {input.inbam} --inmod {input.inmod} --outprefix {params.outprefix}
+        '''
+
+
+rule tabix_index_5mc:
+    input:
+        '5mc_results/{name}.{mod}_genome_pos.tsv'
+    output:
+        bgzip = '5mc_results/{name}.{mod}_genome_pos.tsv.gz',
+        tbi = '5mc_results/{name}.{mod}_genome_pos.tsv.gz.tbi'
+    threads: 1
+    shell:
+        '''
+bgzip {input}
+tabix -0 -s 3 -b 4 -e 5 -S 1 {output.bgzip}
+        '''
+
+
+rule filter_5mC:
+    input:
+        bam = 'aligned_data/{name}.sorted.bam',
+        tsv = '5mc_results/{name}.C.call_mods.tsv.gz'
+    output:
+        '5mc_results/{name}.C.call_mods.q2.tsv.gz'
+    shell:
+        '''
+python scripts/filter_5mC_callmod.py --bam {input.bam} --tsv {input.tsv} --out {output}
+        '''
+
+
+rule frequency_5mC:
+    input:
+        '5mc_results/{name}.C.call_mods.q2.tsv.gz'
+    output:
+        '5mc_results/frequency/{name}.C.call_mods.frequency.q2.tsv.gz'
+    conda: 'deepsignalpenv'
+    shell:
+        '''
+deepsignal_plant call_freq --input_path {input} --result_file {output} --gzip
+/public1/mowp/workspace/nanopore_modification/deepsignal-plant/scripts/split_freq_file_by_5mC_motif.py --freqfile {output}
+        '''
+
+
+rule make_5mc_bw:
+    input:
+        '5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.tsv.gz'
+    output:
+        bdg = temp('5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.bdg'),
+        bw = '5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.bw',
+    params:
+        genome_size=config['genome_size']
+    shell:
+        '''
+pigz -cdp 10 {input} | awk '{{print $1"\\t"$2"\\t"$2+1"\\t"$10}}' | sort -k1,1 -k2,2n - > {output.bdg}
+bedGraphToBigWig {output.bdg} {params.genome_size} {output.bw}
+        '''
+        
+
+rule tabix_index_freq:
+    input:
+        '5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.tsv.gz'
+    output:
+        gz = '5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.sorted.tsv.gz',
+        tbi = '5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.sorted.tsv.gz.tbi'
+    params:
+        sorted='5mc_results/frequency/{name}.C.call_mods.{mod}.frequency.sorted.tsv'
+    shell:
+        '''
+pigz -cdp 10 {input} | sort -k1,1 -k2,2n - > {params.sorted}
+bgzip {params.sorted}
+tabix -0 -b 2 -e 2 -s 1 {output.gz}
+        '''
+
+
+rule bamCoverage:
+    input:
+        'aligned_data/{name}.sorted.bam'
+    output:
+        'aligned_data/{name}.sorted.bw'
+    threads: 16
+    shell:
+        '''
+bamCoverage --bam {input} --outFileName {output} --binSize 1 --normalizeUsing None --skipNonCoveredRegions --numberOfProcessors {threads}
+        '''
+
+
+rule bamCoverage_q2:
+    input:
+        'aligned_data/{name}.sorted.{bam_type}.bam'
+    output:
+        'aligned_data/{name}.sorted.{bam_type}.bw'
+    threads: 16
+    shell:
+        '''
+bamCoverage --bam {input} --outFileName {output} --binSize 1 --normalizeUsing None --skipNonCoveredRegions --numberOfProcessors {threads}
+        '''
