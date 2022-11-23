@@ -1,0 +1,7 @@
+genome: /data/Zhaijx/mowp/db/col-CEN/dna/Col-CEN_v1.2.fasta 
+genome_size: /data/Zhaijx/mowp/db/col-CEN/dna/Col-CEN_v1.2.size
+genome_pkl: /data/Zhaijx/mowp/db/col-CEN/dna/Col-CEN_v1.2.pkl 
+
+samples:
+  - 20221029_col_m6A 
+
