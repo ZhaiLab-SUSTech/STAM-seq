@@ -52,7 +52,8 @@ def load_mod_file(infile: str) -> dict:
     
     for i, line in enumerate(f):
         chrom, pos, strand, _, read_id, read_strand, prob_unm, prob_m, called_label, kmer = line.rstrip().split('\t')
-        called_label = int(called_label)
+        called_label = int(called_label)  # called_label: 0/1, unmethylated/methylated
+        prob_m = float(prob_m)
 
         genome_pos = pos
         # for 5mC motif
@@ -60,7 +61,7 @@ def load_mod_file(infile: str) -> dict:
         mod_type = seq2motif[kmer[kmer_cenpos:(kmer_cenpos+3)]]
         if mod_type.startswith('CG'):
             mod_type = 'CG'
-        if called_label:
+        if prob_m > .9:
             methy_results[read_id][mod_type].append(genome_pos)
             methy_results[read_id]['5mC'].append(genome_pos)
         else:

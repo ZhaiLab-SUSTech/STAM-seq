@@ -72,6 +72,25 @@ def preprocessing(infiles: list, methylation: list, chrom: str, start: int, end:
     return read_set
 
 
+def get_soft_clip_from_bam(infile: list, chrom: str, start: int, end: int):
+    soft_clip = {}
+    bamfile = pysam.AlignmentFile(infile, 'rb')
+    for read in bamfile.fetch(chrom, start, end):
+        left_softclip = read.cigar[0][1] if read.cigar[0][0] == 4 else 0
+        right_softclip = read.cigar[-1][1] if read.cigar[-1][0] == 4 else 0
+        read_id = read.query_name
+
+        if read_id not in soft_clip:
+            soft_clip[read_id] = {
+                'left_softclip': left_softclip,
+                'right_softclip': right_softclip,
+            }
+        else:
+            logger.warning(f"Duplicate read id {read_id} in bam file.")
+    
+    return soft_clip
+
+
 def subsample_reads(mod_results, read_info, fraction: float = 50):
     sample_count = len(mod_results)
     if fraction <= 1:
@@ -427,7 +446,11 @@ def plot_gene_model(
 
         if annotation_pos == "top":
             ax.annotate(
-                gene_id, xy=((chromStart + chromEnd) / 2, y_pos + height * 1.5), ha="center",
+                gene_id, xy=((chromStart + chromEnd) / 2, y_pos + y_space), ha="center",
+            )
+        elif annotation_pos == "bottom":
+            ax.annotate(
+                gene_id, xy=((chromStart + chromEnd) / 2, y_pos - y_space), ha="center",
             )
         elif annotation_pos == 'topleft':
             ax.annotate(
@@ -467,7 +490,7 @@ def filter_low_cov(bw_data, bw_all, min_cov: int = 10):
     bw_data[boo] = .01
 
 
-def get_mod_results(infile: str, chrom: str, start: int, end: int, fully_span: bool = False, left_span: bool = False, right_span: bool = False, start_before: int = None, end_after: int = None, expand: int = 5, unmethylated: bool = False, filter_read: bool = False, read_set: set = None, add_bigwig:bool = False, stranded: bool = False):
+def get_mod_results(infile: str, chrom: str, start: int, end: int, fully_span: bool = False, left_span: bool = False, right_span: bool = False, start_before: int = None, end_after: int = None, expand: int = 5, unmethylated: bool = False, filter_read: bool = False, read_set: set = None, add_bigwig:bool = False, stranded: bool = False, soft_clip: dict = None):
     '''This function takes a bed file and returns a list of the lines in the file that overlap with the
     specified region
     
@@ -496,6 +519,8 @@ def get_mod_results(infile: str, chrom: str, start: int, end: int, fully_span: b
         if True, convert the methylation level from mod results
     strand: bool, option
         if True, the methylation status will be shown on the forward and reverse strand separately
+    soft_clip: dict, optional
+        a dict of soft clip position. If None, will not add soft clip length to the read length
     '''
 
     tbx = pysam.TabixFile(infile)
@@ -572,7 +597,20 @@ def get_mod_results(infile: str, chrom: str, start: int, end: int, fully_span: b
                 bw_unmethy[_unmethylated_pos] += 1
 
         mod_results.append(mod_res)
-        read_info.append((_start - start if _start > start else 0, _end - start if end - _end > 0 else end-start, read_id, strand))  # start, end, read_id, strand
+        read_start = _start - start if _start > start else 0
+        read_end = _end - start if end - _end > 0 else end-start
+
+        # add soft clip length
+        if soft_clip is not None:
+            if read_id in soft_clip:
+                if right_span:
+                    read_start = _start - start
+                    read_start -= soft_clip[read_id]['left_softclip']
+                if left_span:
+                    read_end = _end - start
+                    read_end += soft_clip[read_id]['right_softclip']
+
+        read_info.append((read_start, read_end, read_id, strand))  # start, end, read_id, strand
 
     if add_bigwig:
         if stranded:
@@ -690,7 +728,7 @@ def sorted_reads_by_pos(mod_results, read_info, pos: str = 'end'):
         sorted_index = np.argsort(_read_info)[::-1]
     elif pos == 'start':
         _read_info = np.array(read_info)[:, 0].astype(int)
-        sorted_index = np.argsort(_read_info)[::-1]
+        sorted_index = np.argsort(_read_info)
     else:
         raise ValueError('pos should be either "end" or "start"')
 
@@ -964,6 +1002,7 @@ class Single_Read:
         bw_color: str = '#52af4c',
         data_range: tuple = (None, None),
         read_width: int = 1,
+        soft_clip: dict = None
     ):
         '''This function adds a track to the plot that shows the methylation status
         
@@ -1006,7 +1045,7 @@ class Single_Read:
                 infile, self.chrom, self.start, self.end, 
                 fully_span=fully_span,  left_span=left_span, right_span=right_span,
                 start_before=start_before, end_after=end_after,
-                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set
+                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set, soft_clip=soft_clip
             )
         else:
             if stranded:
@@ -1014,14 +1053,14 @@ class Single_Read:
                 infile, self.chrom, self.start, self.end, 
                 fully_span=fully_span,  left_span=left_span, right_span=right_span,
                 start_before=start_before, end_after=end_after,
-                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set, add_bigwig=True, stranded=True
+                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set, add_bigwig=True, stranded=True, soft_clip=soft_clip
             )
             else:
                 mod_results, read_info, bw_data = get_mod_results(
                 infile, self.chrom, self.start, self.end, 
                 fully_span=fully_span,  left_span=left_span, right_span=right_span,
                 start_before=start_before, end_after=end_after,
-                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set, add_bigwig=True, stranded=False
+                expand=expand, unmethylated=unmethylated, filter_read=filter_read, read_set=read_set, add_bigwig=True, stranded=False, soft_clip=soft_clip
             )
             
         if sort:
@@ -1066,8 +1105,12 @@ class Single_Read:
             mod_results_fwd, read_info_fwd, mod_results_rev, read_info_rev = mod_results_stranded(mod_results, read_info)
 
             if add_bigwig:
-                for bw_data in (bw_data_plus, bw_data_minus):
-                    self.bw_track_list.append((bw_data, bw_data, data_range))
+                for bw_data, strand in zip((bw_data_plus, bw_data_minus), ('+', '-')):
+                    if strand == '+':
+                        self.bw_track_list.append((bw_data, bw_color, data_range))
+                    else:
+                        self.bw_track_list.append((bw_data, bw_color, data_range[::-1]))
+
                     self.track_data.append(('plot_bw', self.bw_tracks_n, bw_track_height))
                     self.bw_tracks_n += 1
                     label = f'bigWig_{self.bw_tracks_n}'
@@ -1142,6 +1185,33 @@ class Single_Read:
             
             self.mod_results[i] = [mod_results[i] for i in sorted_index]
             self.read_info[i] = [read_info[i] for i in sorted_index]
+            
+
+    def sorted_reads_strand_mod(self, by: int = 0, ascending: bool = True, ranges: tuple = None):
+        '''Sort read by values for strand specific mod
+
+        Parameters
+        ----------
+        by : the index of the mod_result used for sorting
+        '''
+        if ranges is None:
+            mod_results_sum = np.sum(self.mod_results[by], axis=1)
+        else:
+            mod_results_sum = np.array(self.mod_results[by])
+            mod_results_sum = np.sum(mod_results_sum[:, ranges[0]:ranges[1]], axis=1)
+        if ascending:
+            sorted_index = np.argsort(mod_results_sum)
+        else:
+            sorted_index = np.argsort(mod_results_sum)[::-1]
+
+        if by % 2 == 0:
+            for i in range(0, len(self.mod_results), 2):
+                self.mod_results[i] = [self.mod_results[i][j] for j in sorted_index]
+                self.read_info[i] = [self.read_info[i][j] for j in sorted_index]
+        else:
+            for i in range(1, len(self.mod_results), 2):
+                self.mod_results[i] = [self.mod_results[i][j] for j in sorted_index]
+                self.read_info[i] = [self.read_info[i][j] for j in sorted_index]
 
 
     def summary(self):

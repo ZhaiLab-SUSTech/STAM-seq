@@ -659,7 +659,7 @@ def genome_wide_bigwig_within_bin(infile: str, chromsize, binsize: int = 100_000
     return coverage
 
 
-def bigwig_range(infile: str, chrom: str, start: int, end: int, binsize: int = 10):
+def bigwig_range(infile: str, chrom: str, start: int, end: int, binsize: int = 10, maxvalue: int = None):
     '''
     get methylation ratio within a range
 
@@ -689,12 +689,33 @@ def bigwig_range(infile: str, chrom: str, start: int, end: int, binsize: int = 1
             _vaules = bwfile.stats(chrom, i, i2)[0]
             if _vaules is None:
                 _vaules = 0
+            if maxvalue is not None and values > maxvalue:
+                values = maxvalue
             values.append(_vaules)
         except RuntimeError:
             raise(RuntimeError(f'{chrom} {i} {i2}'))
     bwfile.close()
 
     return np.array(values)
+
+
+def range_bigwig_within_bin(infile: str, ranges: list, binsize: int = 100_000, stepsize: int = 10_000, maxvalue: int = None):
+    chroms = ranges[:, 0]
+    starts = ranges[:, 1].astype('int')
+    ends = ranges[:, 2].astype('int')
+    
+    with ProcessPoolExecutor(max_workers=len(chroms)) as e:
+        results = e.map(
+            bigwig_range,
+            repeat(infile),
+            chroms, starts, ends,
+            repeat(binsize), repeat(maxvalue))
+    
+    coverage = {}
+    for cov, chrom in zip(results, chroms):
+        coverage[chrom] = cov
+    
+    return coverage
         
 
 
@@ -780,6 +801,8 @@ def subtel_methy_tl(
             continue
         if end_after is not None and not(_end > end_after):
             continue
+        if not(_start <= sub_start and _end >= sub_end):
+            continue
 
         # if read_id == '336e75f1-3dfb-474e-92e9-6fd4c1f9f308':
         #     print(line)
@@ -796,6 +819,6 @@ def subtel_methy_tl(
             raise ValueError('right_span and start_before or left_span and end_after must be set')
         
         if all_n > 0:
-            results.append((read_id, methylated_n/all_n, tel_len, methylated_n, all_n))
+            results.append((read_id, methylated_n/all_n, tel_len, methylated_n, all_n, strand))
 
     return results
